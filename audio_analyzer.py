@@ -7,6 +7,15 @@ import os
 import sys
 from datetime import timedelta, datetime
 
+def get_script_directory():
+    """Get the directory where the script/executable is located"""
+    if getattr(sys, 'frozen', False):
+        # Running as compiled executable
+        return os.path.dirname(sys.executable)
+    else:
+        # Running as script
+        return os.path.dirname(os.path.abspath(__file__))
+
 def resource_path(rel_path):
     """Get absolute path to resource, works for dev and for PyInstaller"""
     if hasattr(sys, "_MEIPASS"):
@@ -915,7 +924,10 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1000, 900)
         
         # Set window icon (for window and taskbar)
+        # Try bundled resource first, then script directory
         icon_path = resource_path("icon.ico")
+        if not os.path.exists(icon_path):
+            icon_path = os.path.join(get_script_directory(), "icon.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         
@@ -1776,7 +1788,10 @@ if __name__ == "__main__":
     app.setStyle("Fusion")
     
     # Set application icon (for taskbar grouping on Windows)
+    # Try bundled resource first, then script directory
     icon_path = resource_path("icon.ico")
+    if not os.path.exists(icon_path):
+        icon_path = os.path.join(get_script_directory(), "icon.ico")
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
     
