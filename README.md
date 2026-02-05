@@ -52,6 +52,11 @@ python -m pip install PySide6 librosa numpy soundfile mutagen
 python audio_analyzer.py
 ```
 
+## בניה
+```bash
+pyinstaller --onefile --windowed --icon=icon.png audio_analyzer.py
+```
+
 ## תמיכה בפורמטים
 
 האפליקציה תומכת בפורמטי אודיו נפוצים:
