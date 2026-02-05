@@ -1611,8 +1611,66 @@ class MainWindow(QMainWindow):
                     f.write(f"- **סולם:** {self.current_results.get('scale', '-')}\n")
                     f.write(f"- **מספר פעימות:** {self.current_results.get('beats_count', '-')}\n")
                     f.write(f"- **Spectral Centroid:** {self.current_results.get('spectral_centroid', '-')}\n")
+                    f.write(f"- **Spectral Rolloff:** {self.current_results.get('spectral_rolloff', '-')}\n")
                     f.write(f"- **RMS Energy:** {self.current_results.get('rms_db', '-')}\n")
                     f.write(f"- **Zero Crossing Rate:** {self.current_results.get('zero_crossing_rate', '-')}\n\n")
+                    
+                    # Transpositions
+                    transpositions = self.current_results.get('transpositions', [])
+                    if transpositions:
+                        f.write("### טרנספוזיציות נפוצות\n\n")
+                        for new_key, description in transpositions:
+                            f.write(f"- **{new_key}** - {description}\n")
+                        f.write("\n")
+                    
+                    # Dynamic Range Analysis
+                    f.write("## Dynamic Range Analysis\n\n")
+                    f.write(f"- **Dynamic Range:** {self.current_results.get('dynamic_range_db', '-')}\n")
+                    f.write(f"- **Crest Factor:** {self.current_results.get('crest_factor', '-')}\n")
+                    f.write(f"- **Loudness Range:** {self.current_results.get('loudness_range', '-')}\n")
+                    f.write(f"- **Peak Amplitude:** {self.current_results.get('peak_amplitude', '-')}\n\n")
+                    
+                    # Energy Peaks
+                    energy_peaks = self.current_results.get('energy_peaks', [])
+                    if energy_peaks:
+                        f.write("### Energy Peaks (רמות אנרגיה גבוהות)\n\n")
+                        for i, (start, end, energy) in enumerate(energy_peaks[:5], 1):
+                            f.write(f"{i}. {format_duration(start)} - {format_duration(end)}\n")
+                        f.write("\n")
+                    
+                    # Quiet Sections
+                    quiet_sections = self.current_results.get('quiet_sections', [])
+                    if quiet_sections:
+                        f.write("### Quiet Sections (חלקים שקטים)\n\n")
+                        for i, (start, end) in enumerate(quiet_sections[:5], 1):
+                            f.write(f"{i}. {format_duration(start)} - {format_duration(end)}\n")
+                        f.write("\n")
+                    
+                    # Mood/Emotion Analysis
+                    f.write("## Mood/Emotion Analysis\n\n")
+                    f.write(f"- **מצב רוח עיקרי:** {self.current_results.get('primary_mood', '-')}\n")
+                    secondary_moods = self.current_results.get('secondary_moods', [])
+                    if secondary_moods:
+                        f.write(f"- **משניים:** {', '.join(secondary_moods)}\n")
+                    f.write("\n")
+                    
+                    # Mood Scores
+                    mood_scores = self.current_results.get('mood_scores', {})
+                    if mood_scores:
+                        f.write("### ציוני Mood\n\n")
+                        sorted_moods = sorted(mood_scores.items(), key=lambda x: x[1], reverse=True)
+                        for mood, score in sorted_moods:
+                            f.write(f"- **{mood}:** {score}\n")
+                        f.write("\n")
+                    
+                    # Song Structure
+                    song_structure = self.current_results.get('song_structure', [])
+                    if song_structure:
+                        f.write("## מבנה השיר\n\n")
+                        for i, section in enumerate(song_structure, 1):
+                            f.write(f"### {i}. {section['label']}\n")
+                            f.write(f"- **זמן:** {section['start']} - {section['end']}\n")
+                            f.write(f"- **משך:** {format_duration(section['end_sec'] - section['start_sec'])}\n\n")
                     
                     f.write("## מטא-דאטה\n\n")
                     artist = self.current_results.get('artist', '-') or '-'
@@ -1626,7 +1684,7 @@ class MainWindow(QMainWindow):
                     f.write(f"- **ז'אנר:** {genre}\n\n")
                     
                     f.write("---\n\n")
-                    f.write("*נוצר באמצעות מנתח אודיו מתקדם - Audio Analyzer*\n")
+                    f.write(f"*נוצר באמצעות מנתח אודיו מתקדם - Audio Analyzer {VERSION}*\n")
                 
                 self.update_log(f"התוצאות יוצאו בהצלחה: {file_path}")
                 QMessageBox.information(self, "הצלחה", "התוצאות יוצאו בהצלחה לקובץ MD")
@@ -1706,6 +1764,6 @@ if __name__ == "__main__":
     app.setStyle("Fusion")
     
     window = MainWindow()
-    window.show()
+    window.showMaximized()  # Open in full screen
     
     sys.exit(app.exec())
