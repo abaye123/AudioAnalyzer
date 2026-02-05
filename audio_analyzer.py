@@ -72,6 +72,33 @@ def get_key_from_chroma(chroma):
     return f"{keys[key_index]} {mode}"
 
 
+def get_transpositions(note, mode):
+    """Get common transposition options for a given key"""
+    keys = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+    
+    try:
+        key_index = keys.index(note)
+    except ValueError:
+        return []
+    
+    # Common transpositions: +2, +5, +7, -2, -5 semitones
+    transpositions = []
+    common_intervals = [
+        (2, "+2 חצאים (טון שלם למעלה)"),
+        (5, "+5 חצאים (רביעית)"),
+        (7, "+7 חצאים (חמישית)"),
+        (-2, "-2 חצאים (טון שלם למטה)"),
+        (-5, "-5 חצאים (רביעית למטה)")
+    ]
+    
+    for interval, description in common_intervals:
+        new_index = (key_index + interval) % 12
+        new_key = f"{keys[new_index]} {mode}"
+        transpositions.append((new_key, description))
+    
+    return transpositions
+
+
 class AnalyzerThread(QThread):
     """Thread for analyzing audio files"""
     update_console = Signal(str)
@@ -218,6 +245,10 @@ class AnalyzerThread(QThread):
             key_parts = key.split(' ')
             results['note'] = key_parts[0] if len(key_parts) > 0 else key
             results['scale'] = key_parts[1] if len(key_parts) > 1 else ''
+            
+            # Get transposition suggestions
+            transpositions = get_transpositions(results['note'], results['scale'])
+            results['transpositions'] = transpositions
             
             # Spectral features
             self.update_console.emit("מחשב מאפיינים ספקטרליים...")
@@ -749,6 +780,61 @@ class MoodAnalysisDialog(QDialog):
         layout.addWidget(close_btn)
 
 
+class TranspositionDialog(QDialog):
+    """Dialog to display transposition options"""
+    def __init__(self, transpositions, current_key, song_name, parent=None):
+        super().__init__(parent)
+        self.transpositions = transpositions
+        self.current_key = current_key
+        self.song_name = song_name
+        self.setWindowTitle(f"טרנספוזיציות - {song_name}")
+        self.setMinimumSize(500, 350)
+        self.setup_ui()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        title = QLabel(f"<h2>טרנספוזיציות למפתח: {self.current_key}</h2>")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        
+        subtitle = QLabel(f"<p style='color: #666;'>{self.song_name}</p>")
+        subtitle.setAlignment(Qt.AlignCenter)
+        layout.addWidget(subtitle)
+        
+        # Create text display
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setFont(QFont("Consolas", 11))
+        
+        if self.transpositions and len(self.transpositions) > 0:
+            content = "<h3>טרנספוזיציות נפוצות:</h3><br>"
+            
+            for new_key, description in self.transpositions:
+                content += f"<b>➜ {new_key}</b><br>"
+                content += f"   <span style='color: #666;'>{description}</span><br><br>"
+            
+            content += "<hr><br>"
+            content += "<p style='color: #666; font-size: 10px;'>"
+            content += "<b>הסבר:</b><br>"
+            content += "הטרנספוזיציות מוצגות למפתחות נפוצים שמתאימים למוזיקאים רבים.<br>"
+            content += "כל טרנספוזיציה משנה את גובה הצלילים אך שומרת על היחסים ביניהם."
+            content += "</p>"
+            
+            text_edit.setHtml(content)
+        else:
+            text_edit.setHtml("<p>לא ניתן לחשב טרנספוזיציות למפתח זה.</p>")
+        
+        layout.addWidget(text_edit)
+        
+        # Close button
+        close_btn = QPushButton("סגור")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setMinimumHeight(40)
+        layout.addWidget(close_btn)
+
+
 class AboutDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1024,6 +1110,13 @@ class MainWindow(QMainWindow):
         self.info_scale = QLabel("-")
         self.info_scale.setStyleSheet("color: #0d6efd; font-size: 14px; font-weight: bold;")
         musical_layout.addWidget(self.info_scale, row, 1)
+        row += 1
+        
+        # Transpositions button
+        self.view_transpose_btn = QPushButton("🎵 הצג טרנספוזיציות")
+        self.view_transpose_btn.clicked.connect(self.show_transpositions)
+        self.view_transpose_btn.setEnabled(False)
+        musical_layout.addWidget(self.view_transpose_btn, row, 0, 1, 2)
         row += 1
         
         # Beats count
@@ -1358,6 +1451,10 @@ class MainWindow(QMainWindow):
         if results.get('tempo_timeline'):
             self.timeline_btn.setEnabled(True)
         
+        # Enable transposition button if we have transposition data
+        if results.get('transpositions'):
+            self.view_transpose_btn.setEnabled(True)
+        
         self.analyze_btn.setEnabled(True)
         self.select_file_btn.setEnabled(True)
         self.status_bar.showMessage("הניתוח הושלם בהצלחה")
@@ -1411,6 +1508,7 @@ class MainWindow(QMainWindow):
         self.view_mood_btn.setEnabled(False)
         self.view_structure_btn.setEnabled(False)
         self.view_energy_btn.setEnabled(False)
+        self.view_transpose_btn.setEnabled(False)
     
     def clear_console(self):
         """Clear console output"""
@@ -1581,6 +1679,19 @@ class MainWindow(QMainWindow):
         secondary_moods = self.current_results.get('secondary_moods', [])
         
         dialog = MoodAnalysisDialog(mood_scores, primary_mood, secondary_moods, song_name, self)
+        dialog.exec()
+    
+    def show_transpositions(self):
+        """Show transposition options dialog"""
+        if not self.current_results or not self.current_results.get('transpositions'):
+            QMessageBox.warning(self, "שגיאה", "אין נתוני טרנספוזיציה זמינים")
+            return
+        
+        song_name = self.current_results.get('file_name', 'Unknown')
+        transpositions = self.current_results.get('transpositions', [])
+        current_key = self.current_results.get('key', 'Unknown')
+        
+        dialog = TranspositionDialog(transpositions, current_key, song_name, self)
         dialog.exec()
     
     def show_about(self):
