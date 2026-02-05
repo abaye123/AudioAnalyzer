@@ -52,10 +52,28 @@ python -m pip install PySide6 librosa numpy soundfile mutagen
 python audio_analyzer.py
 ```
 
-## בניה
+## בניה לקובץ EXE עצמאי
+
+### הוראות בניה עם PyInstaller
+
 ```bash
-pyinstaller --onefile --windowed --icon=icon.png audio_analyzer.py
+pyinstaller --onefile --windowed --icon=icon.ico --add-data "icon.ico;." audio_analyzer.py
 ```
+
+**הסבר הפרמטרים:**
+- `--onefile` - יוצר קובץ exe אחד עצמאי
+- `--windowed` - מסתיר את חלון הקונסול (GUI בלבד)
+- `--icon=icon.ico` - מגדיר את האייקון של קובץ ה-exe (מה שרואים ב-Explorer)
+- `--add-data "icon.ico;."` - מוסיף את האייקון לתוך ה-exe כדי שיוצג בחלון ובשורת המשימות
+
+**חשוב:** ודא שקובץ `icon.ico` נמצא באותה תיקייה כמו `audio_analyzer.py` לפני הבניה.
+
+### מה ההבדל?
+- **`--icon`** משפיע רק על האייקון של קובץ ה-exe עצמו (בExplorer)
+- **`--add-data`** דואג שהאייקון יהיה זמין בזמן ריצה להצגה בחלון ובשורת המשימות
+- הקוד משתמש ב-`resource_path()` כדי למצוא את האייקון גם במצב פיתוח וגם אחרי אריזה
+
+הקובץ המוכן יימצא בתיקייה `dist/audio_analyzer.exe`
 
 ## תמיכה בפורמטים
 

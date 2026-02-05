@@ -7,13 +7,20 @@ import os
 import sys
 from datetime import timedelta, datetime
 
+def resource_path(rel_path):
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    if hasattr(sys, "_MEIPASS"):
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        return os.path.join(sys._MEIPASS, rel_path)
+    return os.path.join(os.path.abspath("."), rel_path)
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFileDialog, QMessageBox, QTextEdit,
     QGroupBox, QStatusBar, QDialog, QGridLayout, QSlider
 )
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QUrl
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 import librosa
@@ -907,6 +914,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("מנתח אודיו מתקדם - Audio Analyzer")
         self.setMinimumSize(1000, 900)
         
+        # Set window icon (for window and taskbar)
+        icon_path = resource_path("icon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        
         # Apply light theme
         self.set_light_mode()
         
@@ -1762,6 +1774,20 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setLayoutDirection(Qt.RightToLeft)
     app.setStyle("Fusion")
+    
+    # Set application icon (for taskbar grouping on Windows)
+    icon_path = resource_path("icon.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+    
+    # Windows-specific: Set AppUserModelID for proper taskbar icon display
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            myappid = "abaye.audioanalyzer.app.1.2.0"
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except:
+            pass  # Not critical if this fails
     
     window = MainWindow()
     window.showMaximized()  # Open in full screen
