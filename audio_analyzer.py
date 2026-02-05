@@ -1,4 +1,4 @@
-# Audio Analyzer v1.1.0 - PySide6
+# Audio Analyzer v1.2.0 - PySide6
 # Date: 05/02/2026
 # Email: cs@abaye.co
 # GitHub: github.com/abaye123
@@ -20,8 +20,11 @@ import librosa
 import soundfile as sf
 from mutagen import File as MutagenFile
 import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 
-VERSION = "v1.1.0"
+VERSION = "v1.2.0"
 
 
 def format_duration(seconds):
@@ -112,16 +115,98 @@ class AnalyzerThread(QThread):
             # Bit depth
             results['bit_depth'] = f"{sf_info.subtype}"
             
-            # BPM (Tempo)
+            # BPM (Tempo) - Analyze in segments to detect tempo changes
             self.update_console.emit("מחשב BPM...")
-            tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
-            # Convert from numpy.float to regular float if needed
-            if isinstance(tempo, np.ndarray):
-                tempo = float(tempo[0]) if len(tempo) > 0 else float(tempo)
+            
+            # Analyze the entire song first
+            tempo_global, beats = librosa.beat.beat_track(y=y, sr=sr)
+            if isinstance(tempo_global, np.ndarray):
+                tempo_global = float(tempo_global[0]) if len(tempo_global) > 0 else float(tempo_global)
             else:
-                tempo = float(tempo)
-            results['bpm'] = f"{tempo:.2f}"
+                tempo_global = float(tempo_global)
+            
+            # Divide song into segments to detect tempo changes
+            segment_duration = 30  # seconds per segment
+            segment_samples = int(segment_duration * sr)
+            num_segments = max(1, int(np.ceil(len(y) / segment_samples)))
+            
+            tempos = []
+            tempo_timeline = []  # Store (time, tempo) pairs for visualization
+            
+            for i in range(num_segments):
+                start_sample = i * segment_samples
+                end_sample = min((i + 1) * segment_samples, len(y))
+                segment = y[start_sample:end_sample]
+                
+                # Calculate time in seconds for this segment
+                segment_time = i * segment_duration
+                
+                # Skip very short segments
+                if len(segment) < sr * 5:  # At least 5 seconds
+                    continue
+                
+                try:
+                    tempo_seg, _ = librosa.beat.beat_track(y=segment, sr=sr)
+                    if isinstance(tempo_seg, np.ndarray):
+                        tempo_seg = float(tempo_seg[0]) if len(tempo_seg) > 0 else float(tempo_seg)
+                    else:
+                        tempo_seg = float(tempo_seg)
+                    
+                    if 40 <= tempo_seg <= 240:  # Valid BPM range
+                        tempos.append(tempo_seg)
+                        tempo_timeline.append((segment_time, tempo_seg))
+                except:
+                    continue
+            
+            # Detect if there are multiple distinct tempos
+            if len(tempos) > 1:
+                # Use clustering to find distinct tempo groups
+                tempos_array = np.array(tempos)
+                tempo_std = np.std(tempos_array)
+                tempo_mean = np.mean(tempos_array)
+                
+                # If standard deviation is high, we likely have tempo changes
+                if tempo_std > 10:  # Threshold for tempo variation
+                    # Find unique tempos (within tolerance)
+                    unique_tempos = []
+                    tolerance = 5  # BPM tolerance
+                    
+                    for tempo in tempos_array:
+                        is_unique = True
+                        for unique_tempo in unique_tempos:
+                            if abs(tempo - unique_tempo) < tolerance:
+                                is_unique = False
+                                break
+                        if is_unique:
+                            unique_tempos.append(tempo)
+                    
+                    # Sort and format
+                    unique_tempos = sorted(unique_tempos)
+                    
+                    if len(unique_tempos) > 1:
+                        # Multiple distinct tempos detected
+                        bpm_str = " / ".join([f"{t:.1f}" for t in unique_tempos])
+                        results['bpm'] = bpm_str
+                        results['bpm_note'] = f"זוהו {len(unique_tempos)} מקצבים שונים"
+                        results['has_tempo_changes'] = True
+                        self.update_console.emit(f"זוהו מספר מקצבים: {bpm_str}")
+                    else:
+                        results['bpm'] = f"{tempo_mean:.2f}"
+                        results['bpm_note'] = ""
+                        results['has_tempo_changes'] = False
+                else:
+                    # Relatively stable tempo
+                    results['bpm'] = f"{tempo_mean:.2f}"
+                    results['bpm_note'] = ""
+                    results['has_tempo_changes'] = False
+            else:
+                # Use global tempo
+                results['bpm'] = f"{tempo_global:.2f}"
+                results['bpm_note'] = ""
+                results['has_tempo_changes'] = False
+            
             results['beats_count'] = len(beats)
+            results['tempo_timeline'] = tempo_timeline  # Save for visualization
             
             # Key estimation
             self.update_console.emit("מזהה מפתח מוזיקלי...")
@@ -193,6 +278,64 @@ class AnalyzerThread(QThread):
             self.analysis_error.emit(str(e))
 
 
+class TempoTimelineDialog(QDialog):
+    """Dialog to display tempo timeline visualization"""
+    def __init__(self, tempo_timeline, song_name, parent=None):
+        super().__init__(parent)
+        self.tempo_timeline = tempo_timeline
+        self.song_name = song_name
+        self.setWindowTitle(f"Timeline של קצב - {song_name}")
+        self.setMinimumSize(900, 500)
+        self.setup_ui()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        # Create matplotlib figure
+        fig = Figure(figsize=(10, 5), dpi=100)
+        canvas = FigureCanvas(fig)
+        layout.addWidget(canvas)
+        
+        # Plot the tempo timeline
+        ax = fig.add_subplot(111)
+        
+        if self.tempo_timeline and len(self.tempo_timeline) > 0:
+            times = [t[0] for t in self.tempo_timeline]
+            tempos = [t[1] for t in self.tempo_timeline]
+            
+            # Plot as step function to show clear transitions
+            ax.step(times, tempos, where='post', linewidth=2, color='#0d6efd', label='BPM')
+            ax.plot(times, tempos, 'o', color='#0d6efd', markersize=6)
+            
+            # Add grid
+            ax.grid(True, alpha=0.3)
+            
+            # Labels
+            ax.set_xlabel('זמן (שניות)', fontsize=12, fontweight='bold')
+            ax.set_ylabel('BPM', fontsize=12, fontweight='bold')
+            ax.set_title(f'Timeline של שינויי קצב - {self.song_name}', fontsize=14, fontweight='bold', pad=15)
+            
+            # Format
+            ax.set_xlim(left=0)
+            y_min, y_max = ax.get_ylim()
+            ax.set_ylim(y_min - 5, y_max + 5)
+            
+            # Add legend
+            ax.legend(loc='upper right')
+        else:
+            ax.text(0.5, 0.5, 'אין מספיק נתונים להצגה', 
+                   ha='center', va='center', fontsize=14)
+        
+        fig.tight_layout()
+        
+        # Close button
+        close_btn = QPushButton("סגור")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setMinimumHeight(40)
+        layout.addWidget(close_btn)
+
+
 class AboutDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -204,7 +347,7 @@ class AboutDialog(QDialog):
         layout = QVBoxLayout()
         self.setLayout(layout)
         
-        title_label = QLabel("מנתח אודיו מתקדם")
+        title_label = QLabel("מנתח אודיו מתקדם - Audio Analyzer")
         title_font = QFont()
         title_font.setPointSize(16)
         title_font.setBold(True)
@@ -262,7 +405,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        self.setWindowTitle("מנתח אודיו מתקדם")
+        self.setWindowTitle("מנתח אודיו מתקדם - Audio Analyzer")
         self.setMinimumSize(1000, 900)
         
         # Apply light theme
@@ -347,7 +490,7 @@ class MainWindow(QMainWindow):
         header_layout = QHBoxLayout()
         main_layout.addLayout(header_layout)
         
-        title_label = QLabel("מנתח אודיו מתקדם")
+        title_label = QLabel("מנתח אודיו מתקדם - Audio Analyzer")
         title_font = QFont()
         title_font.setPointSize(16)
         title_font.setBold(True)
@@ -447,6 +590,13 @@ class MainWindow(QMainWindow):
         self.info_bpm = QLabel("-")
         self.info_bpm.setStyleSheet("color: #0d6efd; font-size: 14px; font-weight: bold;")
         musical_layout.addWidget(self.info_bpm, row, 1)
+        row += 1
+        
+        # BPM Note (for multiple tempos)
+        self.info_bpm_note = QLabel("")
+        self.info_bpm_note.setStyleSheet("color: #666666; font-size: 11px;")
+        self.info_bpm_note.setWordWrap(True)
+        musical_layout.addWidget(self.info_bpm_note, row, 0, 1, 2)
         row += 1
         
         # Note
@@ -590,6 +740,11 @@ class MainWindow(QMainWindow):
         clear_btn.clicked.connect(self.clear_console)
         console_header.addWidget(clear_btn)
         
+        self.timeline_btn = QPushButton("📊 הצג Timeline של קצב")
+        self.timeline_btn.clicked.connect(self.show_tempo_timeline)
+        self.timeline_btn.setEnabled(False)
+        console_header.addWidget(self.timeline_btn)
+        
         export_btn = QPushButton("ייצוא לקובץ MD")
         export_btn.clicked.connect(self.export_results)
         console_header.addWidget(export_btn)
@@ -666,6 +821,7 @@ class MainWindow(QMainWindow):
         
         # Musical analysis
         self.info_bpm.setText(results.get('bpm', '-'))
+        self.info_bpm_note.setText(results.get('bpm_note', ''))
         self.info_note.setText(results.get('note', '-'))
         self.info_scale.setText(results.get('scale', '-'))
         self.info_beats.setText(str(results.get('beats_count', '-')))
@@ -679,9 +835,25 @@ class MainWindow(QMainWindow):
         self.info_album.setText(results.get('album', '-') or '-')
         self.info_genre.setText(results.get('genre', '-') or '-')
         
+        # Enable timeline button if we have tempo data
+        if results.get('tempo_timeline'):
+            self.timeline_btn.setEnabled(True)
+        
         self.analyze_btn.setEnabled(True)
         self.select_file_btn.setEnabled(True)
         self.status_bar.showMessage("הניתוח הושלם בהצלחה")
+    
+    def show_tempo_timeline(self):
+        """Show tempo timeline visualization"""
+        if not self.current_results or not self.current_results.get('tempo_timeline'):
+            QMessageBox.warning(self, "שגיאה", "אין נתוני timeline זמינים")
+            return
+        
+        song_name = self.current_results.get('file_name', 'Unknown')
+        tempo_timeline = self.current_results.get('tempo_timeline', [])
+        
+        dialog = TempoTimelineDialog(tempo_timeline, song_name, self)
+        dialog.exec()
     
     @Slot(str)
     def handle_error(self, error_msg):
@@ -700,6 +872,7 @@ class MainWindow(QMainWindow):
         self.info_channels.setText("-")
         self.info_bit_depth.setText("-")
         self.info_bpm.setText("-")
+        self.info_bpm_note.setText("")
         self.info_note.setText("-")
         self.info_scale.setText("-")
         self.info_beats.setText("-")
@@ -774,10 +947,18 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "שגיאה", "אין תוצאות לייצוא. נא לנתח קובץ תחילה.")
             return
         
+        # Set default save location to Downloads folder
+        downloads_folder = os.path.join(os.path.expanduser("~"), "Downloads")
+        if not os.path.exists(downloads_folder):
+            downloads_folder = os.path.expanduser("~")
+        
+        default_filename = f"{os.path.splitext(self.current_results.get('file_name', 'results'))[0]}_analysis.md"
+        default_path = os.path.join(downloads_folder, default_filename)
+        
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "שמור תוצאות",
-            os.path.expanduser("~") + f"/{os.path.splitext(self.current_results.get('file_name', 'results'))[0]}_analysis.md",
+            default_path,
             "Markdown Files (*.md);;All Files (*.*)"
         )
         
@@ -798,6 +979,8 @@ class MainWindow(QMainWindow):
                     
                     f.write("## ניתוח מוזיקלי\n\n")
                     f.write(f"- **BPM (קצב):** {self.current_results.get('bpm', '-')}\n")
+                    if self.current_results.get('bpm_note'):
+                        f.write(f"  - *{self.current_results.get('bpm_note')}*\n")
                     f.write(f"- **מפתח:** {self.current_results.get('note', '-')}\n")
                     f.write(f"- **סולם:** {self.current_results.get('scale', '-')}\n")
                     f.write(f"- **מספר פעימות:** {self.current_results.get('beats_count', '-')}\n")
@@ -817,7 +1000,7 @@ class MainWindow(QMainWindow):
                     f.write(f"- **ז'אנר:** {genre}\n\n")
                     
                     f.write("---\n\n")
-                    f.write("*נוצר באמצעות מנתח אודיו מתקדם*\n")
+                    f.write("*נוצר באמצעות מנתח אודיו מתקדם - Audio Analyzer*\n")
                 
                 self.update_log(f"התוצאות יוצאו בהצלחה: {file_path}")
                 QMessageBox.information(self, "הצלחה", "התוצאות יוצאו בהצלחה לקובץ MD")
