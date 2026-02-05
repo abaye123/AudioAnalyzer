@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+.Python
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# PyInstaller
+*.spec
+*.build/
+*.dist/
+*.onefile-build/
+audio_analyzer.exe
+audio_analyzer.build/
+audio_analyzer.dist/
+audio_analyzer.onefile-build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific
+*.log
+*.tmp
+
+# Keep these files
+!requirements.txt
+!README.md
+!icon.ico
+!icon.png
