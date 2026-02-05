@@ -239,6 +239,228 @@ class AnalyzerThread(QThread):
             results['rms_energy'] = f"{np.mean(rms):.4f}"
             results['rms_db'] = f"{20 * np.log10(np.mean(rms)):.2f} dB"
             
+            # Energy detection - peaks and quiet sections
+            self.update_console.emit("מזהה אנרגיה לאורך השיר...")
+            
+            # Calculate energy over time with higher temporal resolution
+            hop_length = 512
+            frame_length = 2048
+            rms_detailed = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)[0]
+            
+            # Convert frame indices to time
+            times = librosa.frames_to_time(np.arange(len(rms_detailed)), sr=sr, hop_length=hop_length)
+            
+            # Normalize energy
+            rms_normalized = (rms_detailed - np.min(rms_detailed)) / (np.max(rms_detailed) - np.min(rms_detailed) + 1e-8)
+            
+            # Find peaks (high energy sections)
+            energy_threshold_high = np.percentile(rms_normalized, 80)
+            energy_threshold_low = np.percentile(rms_normalized, 20)
+            
+            peaks = []
+            quiet_sections = []
+            
+            # Detect continuous high energy regions
+            in_peak = False
+            peak_start = 0
+            for i, (t, e) in enumerate(zip(times, rms_normalized)):
+                if e > energy_threshold_high and not in_peak:
+                    in_peak = True
+                    peak_start = t
+                elif e < energy_threshold_high and in_peak:
+                    if t - peak_start > 2:  # Minimum 2 seconds for a peak
+                        peaks.append((peak_start, t, np.mean(rms_normalized[int(peak_start * sr / hop_length):i])))
+                    in_peak = False
+            
+            # Detect continuous low energy regions (quiet sections)
+            in_quiet = False
+            quiet_start = 0
+            for i, (t, e) in enumerate(zip(times, rms_normalized)):
+                if e < energy_threshold_low and not in_quiet:
+                    in_quiet = True
+                    quiet_start = t
+                elif e > energy_threshold_low and in_quiet:
+                    if t - quiet_start > 2:  # Minimum 2 seconds for quiet section
+                        quiet_sections.append((quiet_start, t))
+                    in_quiet = False
+            
+            results['energy_peaks'] = peaks[:10]  # Top 10 peaks
+            results['quiet_sections'] = quiet_sections[:10]  # Top 10 quiet sections
+            results['energy_timeline'] = list(zip(times[::10], rms_normalized[::10]))  # Downsample for visualization
+            
+            # Dynamic Range Analysis
+            self.update_console.emit("מנתח Dynamic Range...")
+            
+            # Calculate peak and RMS levels
+            peak_amplitude = np.max(np.abs(y))
+            rms_amplitude = np.sqrt(np.mean(y**2))
+            
+            # Dynamic range in dB
+            if rms_amplitude > 0:
+                dynamic_range_db = 20 * np.log10(peak_amplitude / rms_amplitude)
+            else:
+                dynamic_range_db = 0
+            
+            # Crest factor
+            if rms_amplitude > 0:
+                crest_factor = peak_amplitude / rms_amplitude
+            else:
+                crest_factor = 0
+            
+            results['dynamic_range_db'] = f"{dynamic_range_db:.2f} dB"
+            results['crest_factor'] = f"{crest_factor:.2f}"
+            results['peak_amplitude'] = f"{peak_amplitude:.4f}"
+            
+            # Loudness range (difference between loudest and quietest parts)
+            loudness_range = 20 * np.log10(np.max(rms_detailed) / (np.min(rms_detailed) + 1e-8))
+            results['loudness_range'] = f"{loudness_range:.2f} dB"
+            
+            # Song Structure Detection
+            self.update_console.emit("מזהה מבנה השיר...")
+            
+            # Use multiple features for structure detection
+            # 1. Spectral features
+            mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+            
+            # 2. Chroma features
+            chroma_struct = librosa.feature.chroma_cqt(y=y, sr=sr)
+            
+            # 3. Self-similarity matrix
+            # Combine features
+            features = np.vstack([mfcc, chroma_struct, rms_detailed[:min(len(rms_detailed), mfcc.shape[1])]])
+            
+            # Compute recurrence matrix
+            rec_matrix = librosa.segment.recurrence_matrix(features, mode='affinity')
+            
+            # Detect boundaries using spectral clustering
+            try:
+                boundaries_frames = librosa.segment.agglomerative(rec_matrix, k=6)
+                boundaries_times = librosa.frames_to_time(boundaries_frames, sr=sr, hop_length=hop_length)
+                
+                # Label sections based on audio characteristics
+                sections = []
+                section_labels = []
+                
+                for i in range(len(boundaries_times) - 1):
+                    start_time = boundaries_times[i]
+                    end_time = boundaries_times[i + 1]
+                    
+                    # Get segment
+                    start_sample = int(start_time * sr)
+                    end_sample = int(end_time * sr)
+                    segment = y[start_sample:end_sample]
+                    
+                    # Analyze segment characteristics
+                    seg_energy = np.mean(librosa.feature.rms(y=segment)[0])
+                    seg_tempo = librosa.beat.tempo(y=segment, sr=sr)[0]
+                    seg_spectral_centroid = np.mean(librosa.feature.spectral_centroid(y=segment, sr=sr)[0])
+                    
+                    # Heuristic labeling
+                    if i == 0 and end_time - start_time < 30:
+                        label = "Intro"
+                    elif i == len(boundaries_times) - 2:
+                        label = "Outro"
+                    elif seg_energy > np.mean(rms_detailed) * 1.2:
+                        label = "Chorus"
+                    elif seg_energy < np.mean(rms_detailed) * 0.8:
+                        label = "Bridge/Break"
+                    else:
+                        label = "Verse"
+                    
+                    sections.append({
+                        'start': format_duration(start_time),
+                        'end': format_duration(end_time),
+                        'start_sec': start_time,
+                        'end_sec': end_time,
+                        'label': label,
+                        'energy': seg_energy
+                    })
+                    section_labels.append(label)
+                
+                results['song_structure'] = sections
+                
+            except Exception as e:
+                self.update_console.emit(f"לא ניתן לזהות מבנה מדויק: {str(e)}")
+                results['song_structure'] = []
+            
+            # Mood/Emotion Detection
+            self.update_console.emit("מזהה mood/emotion...")
+            
+            # Factors for mood detection:
+            # 1. Tempo (BPM)
+            # 2. Mode (Major/Minor)
+            # 3. Energy level
+            # 4. Spectral features
+            
+            avg_tempo = tempo_global
+            mode = results['scale']
+            avg_energy = np.mean(rms_normalized)
+            avg_spectral_centroid = np.mean(spectral_centroids)
+            
+            moods = []
+            mood_scores = {}
+            
+            # Happy indicators
+            happy_score = 0
+            if 'Major' in mode:
+                happy_score += 3
+            if avg_tempo > 120:
+                happy_score += 2
+            if avg_energy > 0.6:
+                happy_score += 2
+            mood_scores['שמח (Happy)'] = happy_score
+            
+            # Sad indicators
+            sad_score = 0
+            if 'Minor' in mode:
+                sad_score += 3
+            if avg_tempo < 100:
+                sad_score += 2
+            if avg_energy < 0.4:
+                sad_score += 2
+            mood_scores['עצוב (Sad)'] = sad_score
+            
+            # Energetic indicators
+            energetic_score = 0
+            if avg_tempo > 130:
+                energetic_score += 3
+            if avg_energy > 0.7:
+                energetic_score += 3
+            if avg_spectral_centroid > 2000:
+                energetic_score += 1
+            mood_scores['אנרגטי (Energetic)'] = energetic_score
+            
+            # Calm indicators
+            calm_score = 0
+            if avg_tempo < 90:
+                calm_score += 2
+            if avg_energy < 0.5:
+                calm_score += 3
+            if avg_spectral_centroid < 1500:
+                calm_score += 2
+            mood_scores['רגוע (Calm)'] = calm_score
+            
+            # Aggressive indicators
+            aggressive_score = 0
+            if avg_tempo > 140:
+                aggressive_score += 2
+            if avg_energy > 0.8:
+                aggressive_score += 2
+            if dynamic_range_db > 15:
+                aggressive_score += 2
+            mood_scores['אגרסיבי (Aggressive)'] = aggressive_score
+            
+            # Sort and get top moods
+            sorted_moods = sorted(mood_scores.items(), key=lambda x: x[1], reverse=True)
+            primary_mood = sorted_moods[0][0] if sorted_moods[0][1] > 0 else "נייטרלי (Neutral)"
+            
+            # Get secondary moods (score > 3)
+            secondary_moods = [mood for mood, score in sorted_moods[1:3] if score > 3]
+            
+            results['primary_mood'] = primary_mood
+            results['secondary_moods'] = secondary_moods
+            results['mood_scores'] = mood_scores
+            
             # Metadata from file
             self.update_console.emit("קורא מטא-דאטה...")
             try:
@@ -328,6 +550,197 @@ class TempoTimelineDialog(QDialog):
                    ha='center', va='center', fontsize=14)
         
         fig.tight_layout()
+        
+        # Close button
+        close_btn = QPushButton("סגור")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setMinimumHeight(40)
+        layout.addWidget(close_btn)
+
+
+class EnergyTimelineDialog(QDialog):
+    """Dialog to display energy timeline visualization"""
+    def __init__(self, energy_timeline, peaks, quiet_sections, song_name, parent=None):
+        super().__init__(parent)
+        self.energy_timeline = energy_timeline
+        self.peaks = peaks
+        self.quiet_sections = quiet_sections
+        self.song_name = song_name
+        self.setWindowTitle(f"Energy Timeline - {song_name}")
+        self.setMinimumSize(900, 500)
+        self.setup_ui()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        # Create matplotlib figure
+        fig = Figure(figsize=(10, 5), dpi=100)
+        canvas = FigureCanvas(fig)
+        layout.addWidget(canvas)
+        
+        # Plot the energy timeline
+        ax = fig.add_subplot(111)
+        
+        if self.energy_timeline and len(self.energy_timeline) > 0:
+            times = [t[0] for t in self.energy_timeline]
+            energies = [t[1] for t in self.energy_timeline]
+            
+            # Plot energy line
+            ax.plot(times, energies, linewidth=2, color='#0d6efd', label='Energy Level')
+            ax.fill_between(times, energies, alpha=0.3, color='#0d6efd')
+            
+            # Mark peaks
+            for peak_start, peak_end, peak_energy in self.peaks:
+                ax.axvspan(peak_start, peak_end, alpha=0.3, color='red', label='Peak' if peak_start == self.peaks[0][0] else '')
+            
+            # Mark quiet sections
+            for quiet_start, quiet_end in self.quiet_sections:
+                ax.axvspan(quiet_start, quiet_end, alpha=0.3, color='green', label='Quiet' if quiet_start == self.quiet_sections[0][0] else '')
+            
+            # Add grid
+            ax.grid(True, alpha=0.3)
+            
+            # Labels
+            ax.set_xlabel('זמן (שניות)', fontsize=12, fontweight='bold')
+            ax.set_ylabel('רמת אנרגיה (normalized)', fontsize=12, fontweight='bold')
+            ax.set_title(f'Energy Timeline - {self.song_name}', fontsize=14, fontweight='bold', pad=15)
+            
+            # Format
+            ax.set_xlim(left=0)
+            ax.set_ylim(0, 1.1)
+            
+            # Add legend
+            handles, labels = ax.get_legend_handles_labels()
+            by_label = dict(zip(labels, handles))
+            ax.legend(by_label.values(), by_label.keys(), loc='upper right')
+        else:
+            ax.text(0.5, 0.5, 'אין מספיק נתונים להצגה', 
+                   ha='center', va='center', fontsize=14)
+        
+        fig.tight_layout()
+        
+        # Close button
+        close_btn = QPushButton("סגור")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setMinimumHeight(40)
+        layout.addWidget(close_btn)
+
+
+class SongStructureDialog(QDialog):
+    """Dialog to display song structure"""
+    def __init__(self, structure, song_name, parent=None):
+        super().__init__(parent)
+        self.structure = structure
+        self.song_name = song_name
+        self.setWindowTitle(f"מבנה השיר - {song_name}")
+        self.setMinimumSize(600, 400)
+        self.setup_ui()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        title = QLabel(f"<h2>מבנה השיר: {self.song_name}</h2>")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        
+        # Create text display
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setFont(QFont("Consolas", 10))
+        
+        if self.structure and len(self.structure) > 0:
+            content = ""
+            for i, section in enumerate(self.structure):
+                content += f"<b>{i + 1}. {section['label']}</b><br>"
+                content += f"   זמן: {section['start']} - {section['end']}<br>"
+                content += f"   משך: {format_duration(section['end_sec'] - section['start_sec'])}<br><br>"
+            
+            text_edit.setHtml(content)
+        else:
+            text_edit.setHtml("<p>לא זוהה מבנה מפורט לשיר זה.</p>")
+        
+        layout.addWidget(text_edit)
+        
+        # Close button
+        close_btn = QPushButton("סגור")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setMinimumHeight(40)
+        layout.addWidget(close_btn)
+
+
+class MoodAnalysisDialog(QDialog):
+    """Dialog to display mood analysis with scores"""
+    def __init__(self, mood_scores, primary_mood, secondary_moods, song_name, parent=None):
+        super().__init__(parent)
+        self.mood_scores = mood_scores
+        self.primary_mood = primary_mood
+        self.secondary_moods = secondary_moods
+        self.song_name = song_name
+        self.setWindowTitle(f"Mood Analysis - {song_name}")
+        self.setMinimumSize(700, 500)
+        self.setup_ui()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        title = QLabel(f"<h2>ניתוח Mood/Emotion: {self.song_name}</h2>")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        
+        # Primary mood
+        primary_label = QLabel(f"<h3>מצב רוח עיקרי: <span style='color: #0d6efd;'>{self.primary_mood}</span></h3>")
+        primary_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(primary_label)
+        
+        # Secondary moods
+        if self.secondary_moods:
+            secondary_text = ", ".join(self.secondary_moods)
+            secondary_label = QLabel(f"<p><b>משניים:</b> {secondary_text}</p>")
+            secondary_label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(secondary_label)
+        
+        # Create matplotlib figure for bar chart
+        fig = Figure(figsize=(8, 4), dpi=100)
+        canvas = FigureCanvas(fig)
+        layout.addWidget(canvas)
+        
+        ax = fig.add_subplot(111)
+        
+        # Sort moods by score
+        sorted_moods = sorted(self.mood_scores.items(), key=lambda x: x[1], reverse=True)
+        moods = [m[0] for m in sorted_moods]
+        scores = [m[1] for m in sorted_moods]
+        
+        # Create bar chart
+        colors = ['#0d6efd' if moods[i] == self.primary_mood else '#6c757d' for i in range(len(moods))]
+        bars = ax.barh(moods, scores, color=colors)
+        
+        # Add value labels
+        for i, (mood, score) in enumerate(zip(moods, scores)):
+            ax.text(score + 0.1, i, str(score), va='center', fontweight='bold')
+        
+        ax.set_xlabel('ציון (Score)', fontsize=11, fontweight='bold')
+        ax.set_title('התפלגות Moods', fontsize=12, fontweight='bold', pad=10)
+        ax.set_xlim(0, max(scores) + 1)
+        ax.grid(axis='x', alpha=0.3)
+        
+        fig.tight_layout()
+        
+        # Explanation
+        explanation = QLabel(
+            "<p style='font-size: 10px; color: #666;'>"
+            "<b>הסבר:</b> הציונים מבוססים על ניתוח מספר פרמטרים מוזיקליים:<br>"
+            "• Tempo (BPM) - קצב השיר<br>"
+            "• Mode - מז'ור/מינור<br>"
+            "• Energy Level - רמת האנרגיה הממוצעת<br>"
+            "• Spectral Features - מאפיינים ספקטרליים"
+            "</p>"
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
         
         # Close button
         close_btn = QPushButton("סגור")
@@ -640,6 +1053,82 @@ class MainWindow(QMainWindow):
         musical_layout.setRowStretch(row, 1)
         results_layout.addWidget(musical_group)
         
+        # Advanced Analysis - new row for additional features
+        advanced_layout = QHBoxLayout()
+        main_layout.addLayout(advanced_layout)
+        
+        # Dynamic Range group
+        dynamic_group = QGroupBox("Dynamic Range Analysis")
+        dynamic_layout = QGridLayout()
+        dynamic_group.setLayout(dynamic_layout)
+        
+        row = 0
+        dynamic_layout.addWidget(QLabel("<b>Dynamic Range:</b>"), row, 0)
+        self.info_dynamic_range = QLabel("-")
+        dynamic_layout.addWidget(self.info_dynamic_range, row, 1)
+        row += 1
+        
+        dynamic_layout.addWidget(QLabel("<b>Crest Factor:</b>"), row, 0)
+        self.info_crest_factor = QLabel("-")
+        dynamic_layout.addWidget(self.info_crest_factor, row, 1)
+        row += 1
+        
+        dynamic_layout.addWidget(QLabel("<b>Loudness Range:</b>"), row, 0)
+        self.info_loudness_range = QLabel("-")
+        dynamic_layout.addWidget(self.info_loudness_range, row, 1)
+        row += 1
+        
+        dynamic_layout.setRowStretch(row, 1)
+        advanced_layout.addWidget(dynamic_group)
+        
+        # Mood/Emotion group
+        mood_group = QGroupBox("Mood/Emotion")
+        mood_layout = QGridLayout()
+        mood_group.setLayout(mood_layout)
+        
+        row = 0
+        mood_layout.addWidget(QLabel("<b>מצב רוח עיקרי:</b>"), row, 0)
+        self.info_primary_mood = QLabel("-")
+        self.info_primary_mood.setStyleSheet("color: #0d6efd; font-size: 14px; font-weight: bold;")
+        mood_layout.addWidget(self.info_primary_mood, row, 1)
+        row += 1
+        
+        mood_layout.addWidget(QLabel("<b>משניים:</b>"), row, 0)
+        self.info_secondary_moods = QLabel("-")
+        self.info_secondary_moods.setWordWrap(True)
+        mood_layout.addWidget(self.info_secondary_moods, row, 1)
+        row += 1
+        
+        self.view_mood_btn = QPushButton("📊 הצג ניתוח Mood מפורט")
+        self.view_mood_btn.clicked.connect(self.show_mood_analysis)
+        self.view_mood_btn.setEnabled(False)
+        mood_layout.addWidget(self.view_mood_btn, row, 0, 1, 2)
+        row += 1
+        
+        mood_layout.setRowStretch(row, 1)
+        advanced_layout.addWidget(mood_group)
+        
+        # Song Structure group
+        structure_group = QGroupBox("מבנה השיר")
+        structure_layout = QVBoxLayout()
+        structure_group.setLayout(structure_layout)
+        
+        self.info_structure_count = QLabel("לא זוהה מבנה")
+        structure_layout.addWidget(self.info_structure_count)
+        
+        self.view_structure_btn = QPushButton("📊 הצג מבנה השיר")
+        self.view_structure_btn.clicked.connect(self.show_song_structure)
+        self.view_structure_btn.setEnabled(False)
+        structure_layout.addWidget(self.view_structure_btn)
+        
+        self.view_energy_btn = QPushButton("⚡ הצג Energy Timeline")
+        self.view_energy_btn.clicked.connect(self.show_energy_timeline)
+        self.view_energy_btn.setEnabled(False)
+        structure_layout.addWidget(self.view_energy_btn)
+        
+        structure_layout.addStretch()
+        advanced_layout.addWidget(structure_group)
+        
         # Metadata group
         metadata_group = QGroupBox("מטא-דאטה")
         metadata_layout = QGridLayout()
@@ -835,6 +1324,36 @@ class MainWindow(QMainWindow):
         self.info_album.setText(results.get('album', '-') or '-')
         self.info_genre.setText(results.get('genre', '-') or '-')
         
+        # Dynamic Range
+        self.info_dynamic_range.setText(results.get('dynamic_range_db', '-'))
+        self.info_crest_factor.setText(results.get('crest_factor', '-'))
+        self.info_loudness_range.setText(results.get('loudness_range', '-'))
+        
+        # Mood/Emotion
+        self.info_primary_mood.setText(results.get('primary_mood', '-'))
+        secondary_moods = results.get('secondary_moods', [])
+        if secondary_moods:
+            self.info_secondary_moods.setText(", ".join(secondary_moods))
+        else:
+            self.info_secondary_moods.setText("-")
+        
+        # Enable mood button if we have mood data
+        if results.get('mood_scores'):
+            self.view_mood_btn.setEnabled(True)
+        
+        # Song Structure
+        song_structure = results.get('song_structure', [])
+        if song_structure:
+            self.info_structure_count.setText(f"זוהו {len(song_structure)} חלקים")
+            self.view_structure_btn.setEnabled(True)
+        else:
+            self.info_structure_count.setText("לא זוהה מבנה")
+            self.view_structure_btn.setEnabled(False)
+        
+        # Energy Timeline
+        if results.get('energy_timeline'):
+            self.view_energy_btn.setEnabled(True)
+        
         # Enable timeline button if we have tempo data
         if results.get('tempo_timeline'):
             self.timeline_btn.setEnabled(True)
@@ -883,6 +1402,15 @@ class MainWindow(QMainWindow):
         self.info_title.setText("-")
         self.info_album.setText("-")
         self.info_genre.setText("-")
+        self.info_dynamic_range.setText("-")
+        self.info_crest_factor.setText("-")
+        self.info_loudness_range.setText("-")
+        self.info_primary_mood.setText("-")
+        self.info_secondary_moods.setText("-")
+        self.info_structure_count.setText("לא זוהה מבנה")
+        self.view_mood_btn.setEnabled(False)
+        self.view_structure_btn.setEnabled(False)
+        self.view_energy_btn.setEnabled(False)
     
     def clear_console(self):
         """Clear console output"""
@@ -1014,6 +1542,46 @@ class MainWindow(QMainWindow):
         self.console_text.append(message)
         scrollbar = self.console_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+    
+    def show_energy_timeline(self):
+        """Show energy timeline visualization"""
+        if not self.current_results or not self.current_results.get('energy_timeline'):
+            QMessageBox.warning(self, "שגיאה", "אין נתוני אנרגיה זמינים")
+            return
+        
+        song_name = self.current_results.get('file_name', 'Unknown')
+        energy_timeline = self.current_results.get('energy_timeline', [])
+        peaks = self.current_results.get('energy_peaks', [])
+        quiet_sections = self.current_results.get('quiet_sections', [])
+        
+        dialog = EnergyTimelineDialog(energy_timeline, peaks, quiet_sections, song_name, self)
+        dialog.exec()
+    
+    def show_song_structure(self):
+        """Show song structure dialog"""
+        if not self.current_results or not self.current_results.get('song_structure'):
+            QMessageBox.warning(self, "שגיאה", "אין נתוני מבנה זמינים")
+            return
+        
+        song_name = self.current_results.get('file_name', 'Unknown')
+        structure = self.current_results.get('song_structure', [])
+        
+        dialog = SongStructureDialog(structure, song_name, self)
+        dialog.exec()
+    
+    def show_mood_analysis(self):
+        """Show mood analysis dialog"""
+        if not self.current_results or not self.current_results.get('mood_scores'):
+            QMessageBox.warning(self, "שגיאה", "אין נתוני mood זמינים")
+            return
+        
+        song_name = self.current_results.get('file_name', 'Unknown')
+        mood_scores = self.current_results.get('mood_scores', {})
+        primary_mood = self.current_results.get('primary_mood', 'Unknown')
+        secondary_moods = self.current_results.get('secondary_moods', [])
+        
+        dialog = MoodAnalysisDialog(mood_scores, primary_mood, secondary_moods, song_name, self)
+        dialog.exec()
     
     def show_about(self):
         """Show about dialog"""
